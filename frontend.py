@@ -38,18 +38,27 @@ def main():
             "Pilih Dataset Analisis:", 
             ["Pilih...", "Dataset Performa Turbin (turbine_speed_direction.csv)", "Dataset Keandalan Gearbox (turbine_gearbox.csv)"]
         )
+        
         if pilihan_data != "Pilih...":
             if st.session_state.selected_dataset_name != pilihan_data:
                 with st.spinner("Membaca file data dari penyimpanan..."):
-                    st.session_state.active_data = be.load_real_data(pilihan_data)
-                    st.session_state.selected_dataset_name = pilihan_data
-                    # Reset model jika ganti dataset
-                    for key in list(st.session_state.keys()):
-                        if "trained" in key or "hasil" in key:
-                            del st.session_state[key]
+                    loaded_data = be.load_real_data(pilihan_data)
+                    
+                    # Tambahan Error Handling jika file tidak ditemukan/rusak
+                    if loaded_data is None:
+                        st.error("❌ File CSV tidak ditemukan atau format rusak. Pastikan file berada di direktori yang tepat.")
+                        st.session_state.active_data = None
+                        st.session_state.selected_dataset_name = ""
+                    else:
+                        st.session_state.active_data = loaded_data
+                        st.session_state.selected_dataset_name = pilihan_data
+                        # Reset model jika ganti dataset
+                        for key in list(st.session_state.keys()):
+                            if "trained" in key or "hasil" in key:
+                                del st.session_state[key]
                             
             if st.session_state.active_data is not None:
-                st.success("File berhasil dimuat!")
+                st.success("✅ File berhasil dimuat!")
                 
                 if "Performa Turbin" in pilihan_data:
                     tab_data, tab_eda_corr, tab_eda_dist, tab_windrose = st.tabs(["Tabel Data Fisis", "Matriks Korelasi", "Distribusi Data", "Wind Rose (Arah Angin)"])
@@ -82,18 +91,18 @@ def main():
         
         st.header(f"Modul: {menu}")
         
-        # --- BLOK KHUSUS: KOSONGKAN FUNGSI 2 SEMENTARA ---
+        # --- BLOK KHUSUS: FUNGSI 2 DIKUNCI SEMENTARA ---
         if not is_fungsi_1:
-            st.warning("🚧 **PEMELIHARAAN SISTEM:** Modul Fungsi 2 (Deteksi Anomali) sedang dikosongkan sementara untuk perombakan arsitektur. Silakan kembali lagi nanti.")
+            st.warning("🚧 **PEMELIHARAAN SISTEM:** Modul Fungsi 2 (Deteksi Anomali) belum diaktifkan pada iterasi ini. Silakan gunakan Fungsi 1 terlebih dahulu.")
             return # Menghentikan eksekusi kode di bawahnya untuk Fungsi 2
         # --------------------------------------------------
 
         if st.session_state.active_data is None:
-            st.warning("⚠️ Silakan Load Dataset terlebih dahulu di Menu Utama!")
+            st.warning("⚠️ Silakan Load Dataset terlebih dahulu di Menu '1. Load Dataset & EDA'!")
             return
 
         if "Performa Turbin" not in st.session_state.selected_dataset_name:
-            st.error("Wajib menggunakan 'Dataset Performa Turbin' untuk Fungsi 1.")
+            st.error("❌ Wajib menggunakan 'Dataset Performa Turbin' untuk menjalankan Fungsi 1.")
             return
 
         st.subheader("⚙️ 1. Konfigurasi Model Lanjutan")
@@ -113,7 +122,7 @@ def main():
             st.session_state[f"{nama_fungsi}_setup"] = {"train_size": train_size, "epochs": epochs}
 
         if st.button("🚀 Mulai Pelatihan Machine Learning", use_container_width=True):
-            with st.spinner(f"Melatih {st.session_state.get(f'{nama_fungsi}_metode')}... (Mohon tunggu)"):
+            with st.spinner(f"Melatih {st.session_state.get(f'{nama_fungsi}_metode')}... (Ini mungkin memakan waktu)"):
                 hasil_training = be.run_regression_fungsi1(st.session_state[f"{nama_fungsi}_metode"], st.session_state[f"{nama_fungsi}_setup"], st.session_state.active_data)
                 
                 db.log_training(nama_fungsi, st.session_state[f"{nama_fungsi}_metode"], st.session_state[f"{nama_fungsi}_setup"], f"Sukses ({hasil_training['metrik1_nilai']})")
@@ -153,7 +162,7 @@ def main():
                     fig3 = px.bar(hasil["feature_importance"], x="Tingkat Kepentingan", y="Fitur", orientation='h', color="Tingkat Kepentingan", color_continuous_scale='viridis')
                     st.plotly_chart(fig3, use_container_width=True)
                 else:
-                    st.info("Algoritma Time-Series (RNN/SARIMA) memproses fitur sebagai urutan waktu, sehingga tidak mengekstrak bobot 'Feature Importance' secara eksplisit.")
+                    st.info("Algoritma Time-Series (RNN/SARIMA) atau MLP memproses fitur dalam dimensi yang tidak bisa diekstrak 'Feature Importance' statisnya secara eksplisit seperti pada algoritma berbasis Tree.")
 
             st.markdown("---")
             
@@ -161,57 +170,63 @@ def main():
             # 3. SIMULATOR & ANALISIS BISNIS
             # ==========================================
             st.subheader("🎮 3. Control Room Simulator & Analisis Bisnis")
-            model = hasil["model"]
             
-            col_slider, col_gauge = st.columns([1, 2])
+            # PENAMBAHAN LOGIKA PROTEKSI SARIMA
+            if st.session_state[f"{nama_fungsi}_metode"] == "SARIMA (Time-Series)":
+                st.info("ℹ️ **Simulator Control Room Dinonaktifkan.** \n\nModel SARIMA adalah model murni deret waktu (*time-series*) yang membutuhkan urutan data historis untuk memprediksi nilai masa depan. Memberikan satu baris input cuaca statis (dari slider) tidak sesuai dengan arsitektur matematis SARIMA.")
             
-            with col_slider:
-                st.markdown("**Panel Kendali Cuaca**")
-                ws_100 = st.slider("Kecepatan Angin Hub 100m (m/s)", 0.0, 30.0, 8.5, 0.5)
-                ws_10 = st.slider("Kecepatan Angin Permukaan 10m (m/s)", 0.0, 25.0, 6.0, 0.5)
-                wd_100 = st.slider("Arah Angin (Derajat)", 0, 360, 180, 5) 
-                temp_2 = st.slider("Suhu Udara (°C)", 0.0, 40.0, 25.0, 0.5)
-                rh_2 = st.slider("Kelembaban Relatif (%)", 0.0, 100.0, 80.0, 1.0)
+            else:
+                model = hasil["model"]
                 
-                input_data = pd.DataFrame([[ws_10, ws_100, wd_100, temp_2, rh_2]], columns=['WS_10m', 'WS_100m', 'WD_100m', 'Temp_2m', 'RelHum_2m'])
+                col_slider, col_gauge = st.columns([1, 2])
                 
-                try:
-                    prediksi_mw = model.predict(input_data)[0]
-                    prediksi_mw = max(0, prediksi_mw)
-                except Exception as e:
-                    st.error(f"Error pada inferensi model: {e}")
-                    prediksi_mw = 0
-            
-            with col_gauge:
-                fig_gauge = go.Figure(go.Indicator(
-                    mode = "gauge+number",
-                    value = prediksi_mw,
-                    domain = {'x': [0, 1], 'y': [0, 1]},
-                    title = {'text': "⚡ Estimasi Daya Output (Megawatt)", 'font': {'size': 20}},
-                    gauge = {
-                        'axis': {'range': [None, 3], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                        'bar': {'color': "#1f77b4"},
-                        'bgcolor': "white",
-                        'borderwidth': 2,
-                        'bordercolor': "gray",
-                        'steps': [
-                            {'range': [0, 1], 'color': '#ffcccb'},
-                            {'range': [1, 2], 'color': '#ffffcc'},
-                            {'range': [2, 3], 'color': '#ccffcc'}]
-                    }))
-                fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
-                st.plotly_chart(fig_gauge, use_container_width=True)
+                with col_slider:
+                    st.markdown("**Panel Kendali Cuaca**")
+                    ws_100 = st.slider("Kecepatan Angin Hub 100m (m/s)", 0.0, 30.0, 8.5, 0.5)
+                    ws_10 = st.slider("Kecepatan Angin Permukaan 10m (m/s)", 0.0, 25.0, 6.0, 0.5)
+                    wd_100 = st.slider("Arah Angin (Derajat)", 0, 360, 180, 5) 
+                    temp_2 = st.slider("Suhu Udara (°C)", 0.0, 40.0, 25.0, 0.5)
+                    rh_2 = st.slider("Kelembaban Relatif (%)", 0.0, 100.0, 80.0, 1.0)
+                    
+                    input_data = pd.DataFrame([[ws_10, ws_100, wd_100, temp_2, rh_2]], columns=['WS_10m', 'WS_100m', 'WD_100m', 'Temp_2m', 'RelHum_2m'])
+                    
+                    try:
+                        prediksi_mw = model.predict(input_data)[0]
+                        prediksi_mw = max(0, prediksi_mw)
+                    except Exception as e:
+                        st.error(f"Error pada inferensi model: {e}")
+                        prediksi_mw = 0
+                
+                with col_gauge:
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode = "gauge+number",
+                        value = prediksi_mw,
+                        domain = {'x': [0, 1], 'y': [0, 1]},
+                        title = {'text': "⚡ Estimasi Daya Output (Megawatt)", 'font': {'size': 20}},
+                        gauge = {
+                            'axis': {'range': [None, 3], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                            'bar': {'color': "#1f77b4"},
+                            'bgcolor': "white",
+                            'borderwidth': 2,
+                            'bordercolor': "gray",
+                            'steps': [
+                                {'range': [0, 1], 'color': '#ffcccb'},
+                                {'range': [1, 2], 'color': '#ffffcc'},
+                                {'range': [2, 3], 'color': '#ccffcc'}]
+                        }))
+                    fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
+                    st.plotly_chart(fig_gauge, use_container_width=True)
 
-            st.markdown("#### 📈 Proyeksi Dampak Operasional & Finansial")
-            col_b1, col_b2, col_b3 = st.columns(3)
-            
-            kw_output = prediksi_mw * 1000
-            rumah_tercakup = int(kw_output / 0.9)
-            pendapatan_per_hari = kw_output * 24 * 1444
-            
-            col_b1.info(f"**🏠 Cakupan Listrik:**\n\nMenyuplai **{rumah_tercakup:,}** Rumah Tangga (Asumsi Daya 900VA)")
-            col_b2.success(f"**💰 Proyeksi Pendapatan:**\n\n**Rp {pendapatan_per_hari:,.0f}** / Hari (Asumsi Tarif Rp1.444/kWh PLN)")
-            col_b3.warning(f"**🌱 Karbon Terhindar:**\n\n**{(kw_output * 24 * 0.85) / 1000:.2f} Ton CO2** / Hari (vs PLTU Batu Bara)")
+                st.markdown("#### 📈 Proyeksi Dampak Operasional & Finansial")
+                col_b1, col_b2, col_b3 = st.columns(3)
+                
+                kw_output = prediksi_mw * 1000
+                rumah_tercakup = int(kw_output / 0.9)
+                pendapatan_per_hari = kw_output * 24 * 1444
+                
+                col_b1.info(f"**🏠 Cakupan Listrik:**\n\nMenyuplai **{rumah_tercakup:,}** Rumah Tangga (Asumsi Daya 900VA)")
+                col_b2.success(f"**💰 Proyeksi Pendapatan:**\n\n**Rp {pendapatan_per_hari:,.0f}** / Hari (Asumsi Tarif Rp1.444/kWh PLN)")
+                col_b3.warning(f"**🌱 Karbon Terhindar:**\n\n**{(kw_output * 24 * 0.85) / 1000:.2f} Ton CO2** / Hari (vs PLTU Batu Bara)")
 
     # ==========================================
     # HALAMAN 4: LAPORAN DATABASE

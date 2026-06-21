@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, AdaBoostRegressor
 from sklearn.svm import SVR
@@ -15,18 +16,58 @@ warnings.filterwarnings('ignore')
 
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, mean_absolute_percentage_error
 
-class RNNWrapper:
-    def __init__(self, model):
+# ==========================================
+# CLASS WRAPPERS UNTUK SIMULATOR FRONTEND
+# ==========================================
+
+class MLWrapper:
+    """Wrapper untuk algoritma Machine Learning standar (XGBoost, RF, SVR, MLP, dll)"""
+    def __init__(self, model, scaler=None):
         self.model = model
+        self.scaler = scaler
+
     def predict(self, X):
-        X_arr = np.array(X).reshape((X.shape[0], 1, X.shape[1]))
+        # Jika ada scaler, normalisasi input terlebih dahulu
+        if self.scaler:
+            X_processed = self.scaler.transform(X)
+        else:
+            X_processed = X
+        return self.model.predict(X_processed)
+
+class RNNWrapper:
+    """Wrapper khusus untuk RNN dengan penanganan dimensi time-steps"""
+    def __init__(self, model, scaler, time_steps):
+        self.model = model
+        self.scaler = scaler
+        self.time_steps = time_steps
+
+    def predict(self, X):
+        # Normalisasi input
+        X_scaled = self.scaler.transform(X)
+        
+        # Jika input dari simulator frontend (hanya 1 baris statis)
+        if len(X_scaled) < self.time_steps:
+            # Lakukan padding dengan menduplikasi baris pertama agar memenuhi time_steps
+            pad_size = self.time_steps - len(X_scaled)
+            X_padded = np.vstack([np.tile(X_scaled[0], (pad_size, 1)), X_scaled])
+            X_arr = X_padded.reshape((1, self.time_steps, X_scaled.shape[1]))
+        else:
+            # Ambil n-baris terakhir sesuai time_steps
+            X_arr = X_scaled[-self.time_steps:].reshape((1, self.time_steps, X_scaled.shape[1]))
+            
         return self.model.predict(X_arr, verbose=0).flatten()
 
 class SARIMAWrapper:
+    """Wrapper untuk SARIMA"""
     def __init__(self, model_fit):
         self.model_fit = model_fit
+
     def predict(self, X):
         return self.model_fit.forecast(steps=len(X), exog=X).values
+
+# ==========================================
+# FUNGSI PENGOLAHAN DATA & PELATIHAN
+# ==========================================
 
 def load_real_data(dataset_name):
     try:
@@ -55,6 +96,7 @@ def run_regression_fungsi1(metode, parameters, df):
     else:
         time_series = pd.Series(df.index)
     
+    # Batasi data untuk algoritma yang memakan waktu komputasi tinggi
     if metode == "SARIMA (Time-Series)":
         X = X.tail(2000)
         y = y.tail(2000)
@@ -69,59 +111,105 @@ def run_regression_fungsi1(metode, parameters, df):
     X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=train_ratio, shuffle=False)
     time_train, time_test = train_test_split(time_series, train_size=train_ratio, shuffle=False)
     
+    # Inisialisasi Scaler
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
     feat_importance = None
     
+    # -----------------------------------------------------
+    # PERCABANGAN ALGORITMA MODEL
+    # -----------------------------------------------------
     if metode == "SARIMA (Time-Series)":
+        # SARIMA bekerja lebih baik dengan data unscaled untuk interpretasi eksogen
         model_sm = SARIMAX(endog=y_train, exog=X_train, order=(1, 1, 1))
         model_fit = model_sm.fit(disp=False)
         y_pred = model_fit.predict(start=len(y_train), end=len(y_train)+len(y_test)-1, exog=X_test).values
         model = SARIMAWrapper(model_fit)
         
     elif metode == "Recurrent Neural Network (RNN)":
-        X_train_rnn = np.array(X_train).reshape((X_train.shape[0], 1, X_train.shape[1]))
-        X_test_rnn = np.array(X_test).reshape((X_test.shape[0], 1, X_test.shape[1]))
+        time_steps = 3 
+        
+        # Generator Sliding Window
+        def create_sequences(data_X, data_y, ts):
+            Xs, ys = [], []
+            for i in range(len(data_X) - ts):
+                Xs.append(data_X[i:(i + ts)])
+                ys.append(data_y.iloc[i + ts])
+            return np.array(Xs), np.array(ys)
+            
+        X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train, time_steps)
+        X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test, time_steps)
         
         rnn_model = Sequential()
-        rnn_model.add(SimpleRNN(32, input_shape=(1, X_train.shape[1]), activation='relu'))
+        rnn_model.add(SimpleRNN(32, input_shape=(time_steps, X_train.shape[1]), activation='relu'))
         rnn_model.add(Dense(16, activation='relu'))
         rnn_model.add(Dense(1))
         
         rnn_model.compile(optimizer='adam', loss='mse')
         epochs = parameters.get('epochs', 50)
-        rnn_model.fit(X_train_rnn, y_train, epochs=epochs, batch_size=128, verbose=0)
+        rnn_model.fit(X_train_seq, y_train_seq, epochs=epochs, batch_size=128, verbose=0)
         
-        y_pred = rnn_model.predict(X_test_rnn, verbose=0).flatten()
-        model = RNNWrapper(rnn_model)
+        y_pred = rnn_model.predict(X_test_seq, verbose=0).flatten()
+        model = RNNWrapper(rnn_model, scaler, time_steps)
+        
+        # Sesuaikan indeks label aktual dan waktu agar sesuai panjang sekuens prediksi
+        y_test = y_test.iloc[time_steps:]
+        time_test = time_test.iloc[time_steps:]
         
     elif metode == "XGBoost Regressor":
-        model = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, n_jobs=-1)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': model.feature_importances_})
+        raw_model = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, n_jobs=-1)
+        raw_model.fit(X_train_scaled, y_train)
+        y_pred = raw_model.predict(X_test_scaled)
+        model = MLWrapper(raw_model, scaler)
+        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': raw_model.feature_importances_})
         
     elif metode == "Extra Trees Regressor":
-        model = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': model.feature_importances_})
+        raw_model = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+        raw_model.fit(X_train_scaled, y_train)
+        y_pred = raw_model.predict(X_test_scaled)
+        model = MLWrapper(raw_model, scaler)
+        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': raw_model.feature_importances_})
         
     elif metode == "Random Forest":
-        model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': model.feature_importances_})
+        raw_model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+        raw_model.fit(X_train_scaled, y_train)
+        y_pred = raw_model.predict(X_test_scaled)
+        model = MLWrapper(raw_model, scaler)
+        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': raw_model.feature_importances_})
+        
+    elif metode == "Gradient Boosting":
+        raw_model = GradientBoostingRegressor(n_estimators=100, random_state=42)
+        raw_model.fit(X_train_scaled, y_train)
+        y_pred = raw_model.predict(X_test_scaled)
+        model = MLWrapper(raw_model, scaler)
+        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': raw_model.feature_importances_})
+
+    elif metode == "AdaBoost Regressor":
+        raw_model = AdaBoostRegressor(n_estimators=100, random_state=42)
+        raw_model.fit(X_train_scaled, y_train)
+        y_pred = raw_model.predict(X_test_scaled)
+        model = MLWrapper(raw_model, scaler)
+        feat_importance = pd.DataFrame({'Fitur': features, 'Tingkat Kepentingan': raw_model.feature_importances_})
         
     elif metode == "Multi-Layer Perceptron (MLP)":
-        model = MLPRegressor(max_iter=parameters.get('epochs', 200), random_state=42)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-    else: 
-        model = SVR(kernel='rbf', C=100, gamma=0.1, epsilon=.1)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
+        raw_model = MLPRegressor(max_iter=parameters.get('epochs', 200), random_state=42)
+        raw_model.fit(X_train_scaled, y_train)
+        y_pred = raw_model.predict(X_test_scaled)
+        model = MLWrapper(raw_model, scaler)
         
+    else: 
+        # Support Vector Regressor (SVR)
+        raw_model = SVR(kernel='rbf', C=100, gamma=0.1, epsilon=.1)
+        raw_model.fit(X_train_scaled, y_train)
+        y_pred = raw_model.predict(X_test_scaled)
+        model = MLWrapper(raw_model, scaler)
+        
+    # Pastikan daya tidak negatif secara fisis
     y_pred = np.maximum(y_pred, 0)
         
+    # Kalkulasi Metrik Evaluasi
     r2 = r2_score(y_test, y_pred)
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     mae = mean_absolute_error(y_test, y_pred)
